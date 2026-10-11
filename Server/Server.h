@@ -16,8 +16,8 @@
 // ─────────────────────
 //  * select()         → epoll (Linux scalable I/O multiplexing)
 //  * client_socket_[30] fixed array + O(n) scan
-//                     → BitmapAllocator<64> giving O(1) alloc/free via
-//                        __builtin_ctzll on a uint64_t bitmask
+//                     → two-level BitmapAllocator (65,536 slots) giving
+//                        near-O(1) alloc/free via __builtin_ctzll
 //  * 5 detached threads sharing same mutex (no .join on shutdown)
 //                     → WORKER_THREAD_COUNT joinable threads with a
 //                        stop_flag_ for clean shutdown
@@ -32,6 +32,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <queue>
+#include <deque>
 #include <vector>
 #include <array>
 #include <atomic>
@@ -50,41 +51,61 @@ inline constexpr int    WORKER_THREAD_COUNT  = 4;
 inline constexpr int    LISTEN_BACKLOG       = 128;
 
 // ── Bitmap Session Allocator ──────────────────────────────────────────────
-// Manages up to 64 concurrent client slots using a single uint64_t.
-// allocate(): O(1) via __builtin_ctzll (count trailing zeros).
-// free():     O(1) bitwise OR.
+// Manages up to CAPACITY concurrent client slots with a two-level bitmap:
+//   words_[w]   bit b set  ⇔  slot w*64+b is free
+//   summary_[s] bit b set  ⇔  words_[s*64+b] has at least one free slot
+// allocate(): scan ≤ kSummaryWords summary words, then two __builtin_ctzll
+//             calls → constant work independent of how many slots are used.
+// free():     O(1) bitwise OR on both levels.
 //
 // The class is NOT thread-safe on its own; callers must hold a lock.
 class BitmapAllocator {
 public:
-    static constexpr int CAPACITY = 64;
+    static constexpr int CAPACITY = 65536;
 
-    BitmapAllocator() noexcept : free_mask_(~uint64_t{0}) {}
+    BitmapAllocator() noexcept {
+        words_.fill(~uint64_t{0});
+        summary_.fill(~uint64_t{0});
+    }
 
     // Returns slot index [0, CAPACITY) or -1 if full.
     int allocate() noexcept {
-        if (free_mask_ == 0) return -1;
-        const int slot = __builtin_ctzll(free_mask_);   // index of lowest 1-bit
-        free_mask_ &= ~(uint64_t{1} << slot);           // mark as used
-        return slot;
+        for (int s = 0; s < kSummaryWords; ++s) {
+            if (summary_[s] == 0) continue;
+            const int w   = s * 64 + __builtin_ctzll(summary_[s]);
+            const int bit = __builtin_ctzll(words_[w]);   // index of lowest 1-bit
+            words_[w] &= ~(uint64_t{1} << bit);           // mark as used
+            if (words_[w] == 0)                           // word now full
+                summary_[s] &= ~(uint64_t{1} << (w % 64));
+            return w * 64 + bit;
+        }
+        return -1;
     }
 
     // Marks slot as free.  Undefined behaviour if slot was not allocated.
     void free(int slot) noexcept {
-        free_mask_ |= (uint64_t{1} << slot);
+        const int w = slot / 64;
+        words_[w]        |= (uint64_t{1} << (slot % 64));
+        summary_[w / 64] |= (uint64_t{1} << (w % 64));
     }
 
-    bool full()  const noexcept { return free_mask_ == 0;       }
-    bool empty() const noexcept { return free_mask_ == ~uint64_t{0}; }
+    bool full() const noexcept {
+        for (uint64_t s : summary_) if (s != 0) return false;
+        return true;
+    }
 
 private:
-    uint64_t free_mask_;
+    static constexpr int kWords        = CAPACITY / 64;   // 1024
+    static constexpr int kSummaryWords = kWords / 64;     // 16
+
+    std::array<uint64_t, kWords>        words_;
+    std::array<uint64_t, kSummaryWords> summary_;
 };
 
 // ── Server ────────────────────────────────────────────────────────────────
 class Server {
 public:
-    explicit Server(std::vector<Train> trains);
+    explicit Server(std::deque<Train> trains);
     ~Server();
 
     // Returns 0 on success, non-zero on fatal error.
@@ -125,13 +146,15 @@ private:
     sockaddr_in address_{};
 
     // Per-fd slot bookkeeping: fd → slot index (for bitmap free on disconnect).
-    // Sized to RLIMIT_NOFILE default; direct-index into an array.
-    static constexpr int FD_MAP_SIZE = 4096;
-    std::array<int, FD_MAP_SIZE> fd_to_slot_{};  // -1 = untracked
+    // Direct-indexed by fd; heap-allocated because it is too large for the
+    // stack-resident Server object.  Leaves headroom above CAPACITY for the
+    // listen / epoll / stdio descriptors.
+    static constexpr int FD_MAP_SIZE = BitmapAllocator::CAPACITY + 1024;
+    std::vector<int> fd_to_slot_;  // -1 = untracked
 
     BitmapAllocator slot_alloc_;
     // client_fd_[slot] = fd  (needed to iterate / close on shutdown)
-    std::array<int, BitmapAllocator::CAPACITY> client_fd_{};
+    std::vector<int> client_fd_;
     // Mutex guarding slot_alloc_, fd_to_slot_, client_fd_.
     std::mutex conn_mutex_;
 
@@ -141,7 +164,7 @@ private:
     std::condition_variable queue_cv_;
 
     // ── Shared business data ─────────────────────────────────────────────
-    std::vector<Train>   trains_;
+    std::deque<Train>    trains_;
     std::vector<Ticket>  tickets_;
     std::mutex           tickets_mutex_;   // guards tickets_ vector
 

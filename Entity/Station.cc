@@ -4,9 +4,9 @@
 int Station::station_quantity_ = 0;
 
 Station::Station(std::string name, int distance)
-    : name_(std::move(name))
+    : station_id_(station_quantity_++)   // assign then increment
+    , name_(std::move(name))
     , distance_(distance)
-    , station_id_(station_quantity_++)   // assign then increment
 {}
 
 const std::string& Station::getName() const noexcept     { return name_;     }

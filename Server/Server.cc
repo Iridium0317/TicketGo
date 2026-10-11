@@ -16,11 +16,11 @@
 // ---------------------------------------------------------------------------
 // Constructor / Destructor
 // ---------------------------------------------------------------------------
-Server::Server(std::vector<Train> trains)
+Server::Server(std::deque<Train> trains)
     : trains_(std::move(trains))
 {
-    fd_to_slot_.fill(-1);
-    client_fd_.fill(-1);
+    fd_to_slot_.assign(FD_MAP_SIZE, -1);
+    client_fd_.assign(BitmapAllocator::CAPACITY, -1);
 }
 
 Server::~Server() {

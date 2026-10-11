@@ -14,6 +14,7 @@
 
 #include <csignal>
 #include <iostream>
+#include <deque>
 #include <vector>
 
 // ── Global station table ─────────────────────────────────────────────────
@@ -55,10 +56,10 @@ static void initStations() {
 }
 
 // ── Train fleet ───────────────────────────────────────────────────────────
-static std::vector<Train> createTrains() {
+static std::deque<Train> createTrains() {
     // Train(capacity, station_number, train_id)
     // station_number must be in [2, all_stations.size()].
-    std::vector<Train> fleet;
+    std::deque<Train> fleet;
     fleet.emplace_back(100, 11, 0);
     fleet.emplace_back(100, 13, 1);
     fleet.emplace_back(100, 15, 2);
@@ -72,7 +73,7 @@ int main() {
     // because the Train constructor reads all_stations.
     initStations();
 
-    std::vector<Train> trains = createTrains();
+    std::deque<Train> trains = createTrains();
 
     Server server(std::move(trains));
 

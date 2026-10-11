@@ -18,6 +18,7 @@
 // =============================================================================
 #include <string>
 #include <string_view>
+#include <deque>
 #include <vector>
 #include <optional>
 #include <mutex>
@@ -56,7 +57,7 @@ public:
 
     // Executes the decoded command against the shared train & ticket stores.
     // Returns a TaskResult that the worker thread sends back to the client.
-    TaskResult doTask(std::vector<Train>& trains);
+    TaskResult doTask(std::deque<Train>& trains);
 
 private:
     int              sd_;

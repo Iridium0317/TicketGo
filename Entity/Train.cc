@@ -4,6 +4,7 @@
 #include <numeric>      // std::iota
 #include <random>       // std::mt19937, std::random_device
 #include <iostream>
+#include <mutex>        // std::unique_lock
 #include <set>
 #include <vector>
 
@@ -15,9 +16,9 @@ int Train::train_quantity_ = 0;
 // Constructor
 // ---------------------------------------------------------------------------
 Train::Train(int capacity, int station_number, int train_id)
-    : capacity_(capacity)
+    : train_id_(train_id)
+    , capacity_(capacity)
     , station_number_(station_number)
-    , train_id_(train_id)
 {
     const int total = static_cast<int>(all_stations.size());
 

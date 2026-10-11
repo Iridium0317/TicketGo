@@ -93,7 +93,7 @@ static const std::string kSep = "----------------------------------------\n";
 // ---------------------------------------------------------------------------
 // doTask()
 // ---------------------------------------------------------------------------
-TaskResult Task::doTask(std::vector<Train>& trains) {
+TaskResult Task::doTask(std::deque<Train>& trains) {
     if (decode() == -1) {
         return {false, "操作失败，请检查您的输入，并重试。\n"};
     }

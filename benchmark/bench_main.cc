@@ -31,6 +31,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <iomanip>
@@ -205,7 +206,7 @@ static void bench_rwlock() {
             for (long long i = 0; i < READ_OPS; ++i) {
                 std::shared_lock lock(rw);
                 local += value;   // simulates getTicketNumber()
-                for (volatile int j = 0; j < 50; ++j) {}  // simulate query work
+                for (volatile int j = 0; j < 500; ++j) {}  // simulate query work
             }
             total_reads.fetch_add(local, std::memory_order_relaxed);
         };
