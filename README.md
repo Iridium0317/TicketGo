@@ -2,13 +2,12 @@
 
 A multithreaded train-ticketing TCP server for Linux.
 
-This is a modernised and extended version of an open-source C++ TicketGo course project. The segment-inventory data model and the client/server protocol come from the original. This version contributes:
+TicketGo started as my undergraduate course project. This version rebuilds it in modern C++17 and adds:
 
-- the move from `select` to edge-triggered `epoll`;
-- thread-safe inventory using a reader–writer lock and re-checking availability under the lock;
-- the bitmap connection allocator;
-- C++17 rewrites and bug fixes;
-- the benchmarks and the load test below.
+- edge-triggered `epoll` in place of `select`;
+- thread-safe segment inventory using a reader–writer lock;
+- a bitmap connection allocator;
+- benchmarks and an end-to-end load test, described below.
 
 - **Networking**: Reactor model on edge-triggered `epoll` with non-blocking sockets. The I/O thread hands decoded requests to a fixed worker pool through a `mutex` + `condition_variable` queue. A two-level bitmap allocator assigns connection slots, up to 65,536 of them.
 - **Segment inventory**: a ticket from station *a* to *b* occupies every segment in `[a, b)`. Each purchase re-checks and reserves all of its segments inside one per-train critical section, so tickets are never oversold.
