@@ -1,6 +1,0 @@
-/Users/yihan/Documents/GitHub/TicketGo/(源码)基于C..系统/Modern/build/CMakeFiles/entity.dir
-/Users/yihan/Documents/GitHub/TicketGo/(源码)基于C..系统/Modern/build/CMakeFiles/ticketgo_server.dir
-/Users/yihan/Documents/GitHub/TicketGo/(源码)基于C..系统/Modern/build/CMakeFiles/ticketgo_client.dir
-/Users/yihan/Documents/GitHub/TicketGo/(源码)基于C..系统/Modern/build/CMakeFiles/ticketgo_bench.dir
-/Users/yihan/Documents/GitHub/TicketGo/(源码)基于C..系统/Modern/build/CMakeFiles/edit_cache.dir
-/Users/yihan/Documents/GitHub/TicketGo/(源码)基于C..系统/Modern/build/CMakeFiles/rebuild_cache.dir

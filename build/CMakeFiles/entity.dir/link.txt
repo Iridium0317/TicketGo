@@ -1,2 +1,0 @@
-/usr/bin/ar qc libentity.a CMakeFiles/entity.dir/Entity/Station.cc.o CMakeFiles/entity.dir/Entity/Ticket.cc.o CMakeFiles/entity.dir/Entity/Train.cc.o CMakeFiles/entity.dir/Entity/Task.cc.o
-/usr/bin/ranlib libentity.a
