@@ -7,7 +7,7 @@ TicketGo started as my undergraduate course project. This version rebuilds it in
 - edge-triggered `epoll` in place of `select`;
 - thread-safe segment inventory using a reader–writer lock;
 - a bitmap connection allocator;
-- benchmarks and an end-to-end load test, described below.
+- benchmarks, an end-to-end load test, and a concurrent oversell test, described below.
 
 - **Networking**: Reactor model on edge-triggered `epoll` with non-blocking sockets. The I/O thread hands decoded requests to a fixed worker pool through a `mutex` + `condition_variable` queue. A two-level bitmap allocator assigns connection slots, up to 65,536 of them.
 - **Segment inventory**: a ticket from station *a* to *b* occupies every segment in `[a, b)`. Each purchase re-checks and reserves all of its segments inside one per-train critical section, so tickets are never oversold.
@@ -52,6 +52,24 @@ Results below are from a Docker `gcc:13` container with 8 vCPUs, running on an A
 The load generator is the bottleneck in these runs. When the server and client were pinned to separate 4-core sets, the Python client used all 4 of its cores, while the server used about 1.2 cores at 10K connections. The throughput figures are therefore lower bounds for the server. Latencies are measured on the client and include asyncio scheduling, so they are not reported here as server latency.
 
 Profiling with `perf` at 10K connections shows the reactor thread spends about 60% of its CPU in `pushTask` → `pthread_cond_signal` → futex wake-ups of worker threads. This is the hand-off cost of the single-reactor + worker-pool design. A one-loop-per-thread design would remove it.
+
+### Concurrent purchase (oversell) test
+
+`benchmark/oversell_test.py` opens 50 client connections, which start together after a barrier. Each client sends 200 purchase requests back-to-back. About 30% of the requests target the same full-route ticket on train 0, and the rest buy random overlapping trips on trains 1–3. Afterwards the test replays every successful purchase through a model of the seat rules, then queries the server for all 304 possible trips. It checks that:
+
+- no segment or selling cap was oversold;
+- the server's remaining count for every trip matches the model, so no update was lost or applied twice;
+- every trip that was ever rejected is sold out at the end, so nothing was undersold;
+- the contested trip sold exactly its 100 seats.
+
+```bash
+./build/ticketgo_server >/dev/null &      # needs a fresh server
+python3 benchmark/oversell_test.py --clients 50 --attempts 200 --procs 4
+```
+
+Five runs (seeds 1–5, fresh server each time) in the same Docker setup all passed: 10,000 purchase attempts per run, about 1,300 tickets sold. In each run roughly 3,000 attempts competed for the contested trip, and exactly 100 of them succeeded.
+
+To check that the test can actually catch a race, I changed `buyTicket` so that it checks availability under a shared lock, releases it, and then takes the exclusive lock to decrement. With that change the test reported oversold segments in 2 of 3 runs.
 
 ### Microbenchmarks
 
