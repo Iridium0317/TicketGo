@@ -80,7 +80,7 @@ async def run_client(n_clients, attempts, hot, seed, timeout, barrier):
                 trip = (HOT_TRAIN, 0, TRAIN_STATIONS[HOT_TRAIN] - 1)
             else:
                 trip = random_trip(rng)
-            w.write(f"1 {trip[0]} {trip[1]} {trip[2]} 1".encode())
+            w.write(f"1 {trip[0]} {trip[1]} {trip[2]} 1\n".encode())
             await w.drain()
             reply = await read_reply(r, timeout)
             if "预定成功".encode() in reply:
@@ -102,7 +102,7 @@ def worker(n_clients, attempts, hot, seed, timeout, barrier, out):
 
 
 def query(sock, train, frm, to):
-    sock.sendall(f"1 {train} {frm} {to} 0".encode())
+    sock.sendall(f"1 {train} {frm} {to} 0\n".encode())
     buf = b""
     while not (buf.endswith(SEP_BYTES) and buf.count(SEP_BYTES) >= 2):
         chunk = sock.recv(4096)

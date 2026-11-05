@@ -36,7 +36,7 @@ def random_query():
     n = TRAIN_STATIONS[train]
     frm = random.randrange(0, n - 2)
     to = random.randrange(frm + 1, n - 1)
-    return f"1 {train} {frm} {to} 0".encode()
+    return f"1 {train} {frm} {to} 0\n".encode()
 
 
 async def request(reader, writer, timeout):

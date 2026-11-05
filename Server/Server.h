@@ -28,6 +28,11 @@
 //    tickets
 //  * An fd is closed only once no queued or running task refers to it, so
 //    a worker can never send a reply to a newer connection on the same fd
+//  * TCP is a byte stream, so one read() is not one command.  Each command
+//    ends with '\n'; bytes are buffered per connection and split on '\n',
+//    and a partial command waits for the rest of its bytes
+//  * At most one task per connection is queued or running at a time; later
+//    commands wait in fd_pending_, so replies leave in request order
 //
 // =============================================================================
 #include <sys/epoll.h>
@@ -55,6 +60,10 @@ inline constexpr int    MAX_BUFFER           = 2048;
 inline constexpr int    MAX_EVENTS           = 64;    // epoll_wait batch size
 inline constexpr int    WORKER_THREAD_COUNT  = 4;
 inline constexpr int    LISTEN_BACKLOG       = 128;
+// A connection is dropped if it sends a line longer than this without '\n',
+// or if this many of its commands are already waiting behind each other.
+inline constexpr std::size_t MAX_LINE_BYTES       = 1024;
+inline constexpr std::size_t MAX_PENDING_PER_CONN = 64;
 
 // ── Bitmap Session Allocator ──────────────────────────────────────────────
 // Manages up to CAPACITY concurrent client slots with a two-level bitmap:
@@ -141,14 +150,20 @@ private:
     // Called from the event loop when the listen socket fires.
     void handleNewConnection();
 
-    // Called from the event loop when a client socket has data.
-    // Returns false if the connection should be dropped.
+    // Called from the event loop when a client socket has data.  Reads
+    // until EAGAIN, then hands every complete '\n'-terminated command to
+    // pushTask().  Returns false if the connection should be dropped.
     bool handleClientData(int fd);
 
     // ── Worker-pool helpers ──────────────────────────────────────────────
     void workerLoop();
 
-    void pushTask(int sd, std::string content);
+    // Queues one command for fd, or parks it in fd_pending_ if fd already
+    // has a task queued or running.  Returns false if too many are parked.
+    bool pushTask(int sd, std::string content);
+
+    // Pushes a ready task onto the shared work queue and wakes a worker.
+    void enqueueTask(Task task);
 
     // ── Data members ─────────────────────────────────────────────────────
     int listen_fd_{-1};
@@ -167,14 +182,21 @@ private:
     std::vector<int> client_fd_;
     // fd → id of the connection currently on it (0 = none).
     std::vector<std::uint64_t> fd_conn_id_;
-    // fd → tasks queued or running for it; the fd stays open while > 0.
+    // fd → tasks queued or running for it (0 or 1, since a connection has
+    // at most one task out at a time); the fd stays open while > 0.
     std::vector<int> fd_inflight_;
     // fd → peer gone, close as soon as fd_inflight_ drops to 0.
     std::vector<char> fd_closing_;
+    // fd → complete commands waiting for that fd's current task to finish.
+    std::vector<std::deque<std::string>> fd_pending_;
     std::uint64_t next_conn_id_{1};
     // Mutex guarding slot_alloc_, fd_to_slot_, client_fd_, fd_conn_id_,
-    // fd_inflight_, fd_closing_, next_conn_id_.
+    // fd_inflight_, fd_closing_, fd_pending_, next_conn_id_.
     std::mutex conn_mutex_;
+
+    // fd → bytes received but not yet ending in '\n'.  Touched only by the
+    // event-loop thread, so it needs no lock.
+    std::vector<std::string> inbuf_;
 
     // ── Task queue ───────────────────────────────────────────────────────
     std::queue<Task>        task_queue_;

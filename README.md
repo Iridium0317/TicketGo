@@ -11,6 +11,7 @@ TicketGo started as my undergraduate course project. This version rebuilds it in
 
 - **Networking**: Reactor model on edge-triggered `epoll` with non-blocking sockets. The I/O thread hands decoded requests to a fixed worker pool through a `mutex` + `condition_variable` queue. A two-level bitmap allocator assigns connection slots, up to 65,536 of them.
 - **Segment inventory**: a ticket from station *a* to *b* occupies every segment in `[a, b)`. Each purchase re-checks and reserves all of its segments inside one per-train critical section, so tickets are never oversold.
+- **Framing**: TCP is a byte stream, so one `read()` can hold two commands or half of one. Each command ends with `\n`. The server buffers bytes per connection, splits them on `\n`, and keeps a partial command until the rest arrives. A connection has at most one task queued or running at a time, so pipelined commands are answered in order.
 - **Locking**: each train has a `std::shared_mutex`. Queries take a shared lock; purchases and refunds take an exclusive lock. The train lock and the ticket-ledger lock are never held at the same time, so they cannot deadlock.
 
 ## Build
@@ -28,6 +29,19 @@ cmake --build build -j
 ./build/ticketgo_server        # listens on :8888
 ./build/ticketgo_client        # interactive client
 ```
+
+Or talk to the server directly with `nc localhost 8888`. Each command is one line:
+
+| Command | Meaning |
+|---|---|
+| `1 <train> <from> <to> 0` | Query remaining tickets from stop `from` to stop `to` |
+| `1 <train> <from> <to> 1` | Buy that ticket |
+| `2` | List trains and their stops |
+| `3` | List this connection's tickets |
+| `4 <ticket_id>` | Refund a ticket |
+| `5` | Show all tickets and total income |
+
+Known limitation: replies carry no length prefix or terminator, so a client cannot tell where one reply ends except by its content.
 
 ## Benchmarks
 
@@ -70,6 +84,27 @@ python3 benchmark/oversell_test.py --clients 50 --attempts 200 --procs 4
 Five runs (seeds 1–5, fresh server each time) in the same Docker setup all passed: 10,000 purchase attempts per run, about 1,300 tickets sold. In each run roughly 3,000 attempts competed for the contested trip, and exactly 100 of them succeeded.
 
 To check that the test can actually catch a race, I changed `buyTicket` so that it checks availability under a shared lock, releases it, and then takes the exclusive lock to decrement. With that change the test reported oversold segments in 2 of 3 runs.
+
+### Message framing test
+
+Earlier versions treated each `read()` as exactly one command. The load and oversell tests send one command and wait for its reply before sending the next, so they never caught this. `benchmark/framing_test.py` sends commands the way TCP may actually deliver them:
+
+- two commands in one send;
+- one command split across two sends;
+- a command ending in `\r\n`;
+- `3`, then a purchase, then `3` again, all in one send, checking that the replies come back in that order (30 rounds);
+- 2,000 bytes with no newline, which should get the connection dropped.
+
+```bash
+./build/ticketgo_server >/dev/null &      # needs a fresh server
+python3 benchmark/framing_test.py --rounds 30
+```
+
+The version before this fix passes 1 of the 6 cases. It drops the second of two pipelined commands, and it parses a split query as an error followed by a stray command `3`. The current version passes all 6.
+
+### Connection reuse test
+
+The kernel gives a new connection the lowest free fd, so it often gets the fd that a client that just disconnected was using. `benchmark/fd_reuse_test.py` checks that the new client cannot see or refund the earlier client's ticket. It fails 20 of 20 rounds on the version that identified users by fd, and passes 20 of 20 now.
 
 ### Microbenchmarks
 

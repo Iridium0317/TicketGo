@@ -42,7 +42,10 @@ int Client::init() {
 // sendRequest
 // ---------------------------------------------------------------------------
 int Client::sendRequest(const std::string& content) {
-    const ssize_t sent = ::send(sock_, content.data(), content.size(), 0);
+    // Every command ends with '\n': the server splits the TCP byte stream
+    // into commands on it.
+    const std::string line = content + '\n';
+    const ssize_t sent = ::send(sock_, line.data(), line.size(), 0);
     if (sent < 0) {
         ::perror("send");
         return 1;

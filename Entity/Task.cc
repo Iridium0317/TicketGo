@@ -58,10 +58,11 @@ int Task::decode() {
             int value{};
             // std::from_chars is locale-independent, bounds-safe, and does
             // not require a null-terminated string.
-            const auto [ptr, ec] = std::from_chars(token.data(),
-                                                   token.data() + token.size(),
-                                                   value);
-            if (ec != std::errc{}) return -1;  // non-integer token → bad input
+            const char* const end = token.data() + token.size();
+            const auto [ptr, ec] = std::from_chars(token.data(), end, value);
+            // Reject bad input, including tokens with trailing junk such as
+            // "0\n1": from_chars would parse the 0 and silently ignore the rest.
+            if (ec != std::errc{} || ptr != end) return -1;
 
             if (first) {
                 operate_number_ = value;

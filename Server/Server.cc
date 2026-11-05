@@ -23,6 +23,8 @@ Server::Server(std::deque<Train> trains)
     fd_conn_id_.assign(FD_MAP_SIZE, 0);
     fd_inflight_.assign(FD_MAP_SIZE, 0);
     fd_closing_.assign(FD_MAP_SIZE, 0);
+    fd_pending_.resize(FD_MAP_SIZE);
+    inbuf_.resize(FD_MAP_SIZE);
     client_fd_.assign(BitmapAllocator::CAPACITY, -1);
 }
 
@@ -57,11 +59,14 @@ bool Server::epollAdd(int fd) noexcept {
 void Server::epollRemove(int fd) noexcept {
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
 
-    std::lock_guard<std::mutex> lock(conn_mutex_);
     if (fd >= FD_MAP_SIZE) {
         ::close(fd);
         return;
     }
+    // Event-loop thread only: drop any partial command and its memory.
+    std::string().swap(inbuf_[fd]);
+
+    std::lock_guard<std::mutex> lock(conn_mutex_);
     // A worker still holds a task for this fd: closing now would let
     // accept() hand the same fd to a new client before that worker sends
     // its reply.  The last worker closes it instead (see workerLoop).
@@ -79,6 +84,7 @@ void Server::closeConnLocked(int fd) noexcept {
     ::close(fd);
     fd_conn_id_[fd] = 0;
     fd_closing_[fd] = 0;
+    fd_pending_[fd].clear();
 
     // Return the slot to the allocator.
     if (fd_to_slot_[fd] != -1) {
@@ -257,27 +263,26 @@ void Server::handleNewConnection() {
 // Called ONLY from the main-thread event loop.
 // Edge-triggered: we must read until EAGAIN/EWOULDBLOCK.
 // Returns false if the connection should be closed.
+//
+// TCP delivers a byte stream, not messages: one read() may hold two
+// commands, or half of one.  Bytes are appended to the connection's inbuf_
+// and only complete '\n'-terminated lines become tasks; a trailing partial
+// line stays in inbuf_ until the rest of it arrives.
 // ---------------------------------------------------------------------------
 bool Server::handleClientData(int fd) {
-    char buf[MAX_BUFFER + 1];
-    std::string accumulated;
+    char buf[MAX_BUFFER];
+    std::string& in = inbuf_[fd];   // fd < FD_MAP_SIZE, checked at accept
+    bool peer_closed = false;
 
     while (true) {
         const ssize_t n = ::read(fd, buf, MAX_BUFFER);
 
         if (n > 0) {
-            buf[n] = '\0';
-            accumulated.append(buf, static_cast<std::size_t>(n));
+            in.append(buf, static_cast<std::size_t>(n));
         } else if (n == 0) {
-            // Peer closed the connection.
-            sockaddr_in peer{};
-            socklen_t len = sizeof(peer);
-            ::getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &len);
-            char ip_str[INET_ADDRSTRLEN];
-            ::inet_ntop(AF_INET, &peer.sin_addr, ip_str, sizeof(ip_str));
-            std::cout << "Client disconnected  ip=" << ip_str
-                      << "  fd=" << fd << '\n';
-            return false;
+            // Peer closed.  Still run the complete commands read above.
+            peer_closed = true;
+            break;
         } else {
             if (errno == EAGAIN || errno == EWOULDBLOCK) break;  // done
             ::perror("read");
@@ -285,31 +290,78 @@ bool Server::handleClientData(int fd) {
         }
     }
 
-    if (!accumulated.empty()) {
-        std::cout << "Received from [" << fd << "]: " << accumulated << '\n';
+    // ── Split complete lines off the front of the buffer ─────────────────
+    std::size_t start = 0;
+    while (true) {
+        const std::size_t nl = in.find('\n', start);
+        if (nl == std::string::npos) break;
+
+        std::string line = in.substr(start, nl - start);
+        start = nl + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();  // CRLF
+        if (line.empty()) continue;
+
+        std::cout << "Received from [" << fd << "]: " << line << '\n';
         // Hand off to worker pool – main thread does NO business logic here.
-        pushTask(fd, std::move(accumulated));
+        if (!pushTask(fd, std::move(line))) {
+            std::cerr << "Too many pipelined commands; dropping fd=" << fd << '\n';
+            return false;
+        }
+    }
+    in.erase(0, start);
+
+    if (in.size() > MAX_LINE_BYTES) {
+        std::cerr << "Command too long; dropping fd=" << fd << '\n';
+        return false;
+    }
+
+    if (peer_closed) {
+        sockaddr_in peer{};
+        socklen_t len = sizeof(peer);
+        ::getpeername(fd, reinterpret_cast<sockaddr*>(&peer), &len);
+        char ip_str[INET_ADDRSTRLEN];
+        ::inet_ntop(AF_INET, &peer.sin_addr, ip_str, sizeof(ip_str));
+        std::cout << "Client disconnected  ip=" << ip_str
+                  << "  fd=" << fd << '\n';
+        return false;
     }
     return true;
 }
 
 // ---------------------------------------------------------------------------
 // pushTask  –  producer side
+//
+// A connection has at most one task queued or running.  If two commands
+// from one client went to two workers, the replies could come back in the
+// wrong order, so later commands wait in fd_pending_ and the worker that
+// finishes the current one queues the next (see workerLoop).
 // ---------------------------------------------------------------------------
-void Server::pushTask(int sd, std::string content) {
+bool Server::pushTask(int sd, std::string content) {
     std::uint64_t conn_id;
     {
         std::lock_guard<std::mutex> lock(conn_mutex_);
+        if (fd_inflight_[sd] > 0) {
+            if (fd_pending_[sd].size() >= MAX_PENDING_PER_CONN) return false;
+            fd_pending_[sd].push_back(std::move(content));
+            return true;
+        }
         conn_id = fd_conn_id_[sd];
-        ++fd_inflight_[sd];   // keeps sd open until the reply is sent
+        fd_inflight_[sd] = 1;   // keeps sd open until the reply is sent
     }
 
     // Task stores a reference to tickets_ and tickets_mutex_; both have
     // server lifetime, so this is safe.
-    Task t(sd, conn_id, std::move(content), tickets_, tickets_mutex_);
+    enqueueTask(Task(sd, conn_id, std::move(content), tickets_, tickets_mutex_));
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// enqueueTask
+// ---------------------------------------------------------------------------
+void Server::enqueueTask(Task task) {
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        task_queue_.push(std::move(t));
+        task_queue_.push(std::move(task));
     }
     queue_cv_.notify_one();
 }
@@ -323,6 +375,7 @@ void Server::workerLoop() {
 
         // Wait until there is work OR we have been asked to stop.
         queue_cv_.wait(lock, [this] {
+            // // 等待，直到（条件）为真
             return !task_queue_.empty() || stop_flag_.load(std::memory_order_relaxed);
         });
 
@@ -362,14 +415,32 @@ void Server::workerLoop() {
             }
         }
 
-        // ── Release the fd ────────────────────────────────────────────────
+        // ── Queue this connection's next command, or release the fd ───────
         // If the client disconnected while this task was pending, the event
         // loop deferred the close to us.
         {
             const int fd = task.getSd();
-            std::lock_guard<std::mutex> conn_lock(conn_mutex_);
-            if (--fd_inflight_[fd] == 0 && fd_closing_[fd]) {
-                closeConnLocked(fd);
+            std::string   next;
+            std::uint64_t conn_id = 0;
+            bool          has_next = false;
+            {
+                std::lock_guard<std::mutex> conn_lock(conn_mutex_);
+                if (!fd_pending_[fd].empty()) {
+                    // fd stays in flight; the next command keeps it open.
+                    next = std::move(fd_pending_[fd].front());
+                    fd_pending_[fd].pop_front();
+                    conn_id  = fd_conn_id_[fd];
+                    has_next = true;
+                } else {
+                    fd_inflight_[fd] = 0;
+                    if (fd_closing_[fd]) closeConnLocked(fd);
+                }
+            }
+            // conn_mutex_ is released before queue_mutex_ is taken, so the
+            // two are never held together.
+            if (has_next) {
+                enqueueTask(Task(fd, conn_id, std::move(next),
+                                 tickets_, tickets_mutex_));
             }
         }
     }

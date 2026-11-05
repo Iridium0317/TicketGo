@@ -25,7 +25,7 @@ NO_TICKETS = "您当前没有订单！"
 
 def request(sock, line, idle=0.2):
     """Send one command and collect the reply until the server goes quiet."""
-    sock.sendall(line.encode())
+    sock.sendall((line + "\n").encode())
     sock.settimeout(5.0)
     buf = sock.recv(65536)
     sock.settimeout(idle)
