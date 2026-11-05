@@ -20,6 +20,9 @@ Server::Server(std::deque<Train> trains)
     : trains_(std::move(trains))
 {
     fd_to_slot_.assign(FD_MAP_SIZE, -1);
+    fd_conn_id_.assign(FD_MAP_SIZE, 0);
+    fd_inflight_.assign(FD_MAP_SIZE, 0);
+    fd_closing_.assign(FD_MAP_SIZE, 0);
     client_fd_.assign(BitmapAllocator::CAPACITY, -1);
 }
 
@@ -53,11 +56,32 @@ bool Server::epollAdd(int fd) noexcept {
 // ---------------------------------------------------------------------------
 void Server::epollRemove(int fd) noexcept {
     ::epoll_ctl(epoll_fd_, EPOLL_CTL_DEL, fd, nullptr);
+
+    std::lock_guard<std::mutex> lock(conn_mutex_);
+    if (fd >= FD_MAP_SIZE) {
+        ::close(fd);
+        return;
+    }
+    // A worker still holds a task for this fd: closing now would let
+    // accept() hand the same fd to a new client before that worker sends
+    // its reply.  The last worker closes it instead (see workerLoop).
+    if (fd_inflight_[fd] > 0) {
+        fd_closing_[fd] = 1;
+        return;
+    }
+    closeConnLocked(fd);
+}
+
+// ---------------------------------------------------------------------------
+// closeConnLocked  –  caller holds conn_mutex_
+// ---------------------------------------------------------------------------
+void Server::closeConnLocked(int fd) noexcept {
     ::close(fd);
+    fd_conn_id_[fd] = 0;
+    fd_closing_[fd] = 0;
 
     // Return the slot to the allocator.
-    std::lock_guard<std::mutex> lock(conn_mutex_);
-    if (fd < FD_MAP_SIZE && fd_to_slot_[fd] != -1) {
+    if (fd_to_slot_[fd] != -1) {
         slot_alloc_.free(fd_to_slot_[fd]);
         client_fd_[fd_to_slot_[fd]] = -1;
         fd_to_slot_[fd] = -1;
@@ -207,12 +231,14 @@ void Server::handleNewConnection() {
         const int slot = slot_alloc_.allocate();
         fd_to_slot_[client_fd] = slot;
         client_fd_[slot]       = client_fd;
+        fd_conn_id_[client_fd] = next_conn_id_++;
 
         if (!epollAdd(client_fd)) {
             ::perror("epoll_ctl client");
             slot_alloc_.free(slot);
             fd_to_slot_[client_fd] = -1;
             client_fd_[slot]       = -1;
+            fd_conn_id_[client_fd] = 0;
             ::close(client_fd);
             continue;
         }
@@ -271,9 +297,16 @@ bool Server::handleClientData(int fd) {
 // pushTask  –  producer side
 // ---------------------------------------------------------------------------
 void Server::pushTask(int sd, std::string content) {
+    std::uint64_t conn_id;
+    {
+        std::lock_guard<std::mutex> lock(conn_mutex_);
+        conn_id = fd_conn_id_[sd];
+        ++fd_inflight_[sd];   // keeps sd open until the reply is sent
+    }
+
     // Task stores a reference to tickets_ and tickets_mutex_; both have
     // server lifetime, so this is safe.
-    Task t(sd, std::move(content), tickets_, tickets_mutex_);
+    Task t(sd, conn_id, std::move(content), tickets_, tickets_mutex_);
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         task_queue_.push(std::move(t));
@@ -326,6 +359,17 @@ void Server::workerLoop() {
                     break;   // client disconnected mid-send
                 }
                 sent += static_cast<std::size_t>(s);
+            }
+        }
+
+        // ── Release the fd ────────────────────────────────────────────────
+        // If the client disconnected while this task was pending, the event
+        // loop deferred the close to us.
+        {
+            const int fd = task.getSd();
+            std::lock_guard<std::mutex> conn_lock(conn_mutex_);
+            if (--fd_inflight_[fd] == 0 && fd_closing_[fd]) {
+                closeConnLocked(fd);
             }
         }
     }

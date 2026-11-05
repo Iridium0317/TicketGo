@@ -6,9 +6,9 @@
 //   1. std::shared_mutex replaces std::mutex → true read-write separation.
 //      - Queries (getTicketNumber, isEnoughTickets) → std::shared_lock  (read)
 //      - Mutations (buyTicket, refundTicket)        → std::unique_lock  (write)
-//   2. rand() removed entirely; constructor uses std::mt19937 +
-//      std::uniform_int_distribution via std::sample (C++17) for O(n) station
-//      selection with guaranteed termination.
+//   2. rand() removed entirely; constructor uses std::mt19937 with
+//      std::sample (C++17) for O(n) station selection with guaranteed
+//      termination.
 //   3. Constructor validates station_number to prevent:
 //        a) Underflow when station_number > all_stations.size()
 //        b) The off-by-one rand() % (size+1) bug that could insert an

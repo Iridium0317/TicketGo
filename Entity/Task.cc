@@ -11,10 +11,12 @@ extern std::vector<Station> all_stations;
 // Constructor
 // ---------------------------------------------------------------------------
 Task::Task(int sd,
+           std::uint64_t user_id,
            std::string content,
            std::vector<Ticket>& tickets,
            std::mutex& tickets_mutex)
     : sd_(sd)
+    , user_id_(user_id)
     , content_(std::move(content))
     , tickets_(tickets)
     , tickets_mutex_(tickets_mutex)
@@ -142,7 +144,7 @@ TaskResult Task::doTask(std::deque<Train>& trains) {
         const int abs_to   = train.getAbsoluteStationID(to_rel);
 
         std::unique_lock<std::mutex> tlock(tickets_mutex_);
-        Ticket& newTicket = tickets_.emplace_back(sd_, train.getTrainID(),
+        Ticket& newTicket = tickets_.emplace_back(user_id_, train.getTrainID(),
                                                   abs_from, abs_to);
         newTicket.setRelativeStation(from_rel, to_rel);
         // Take a snapshot of the values we need before releasing the lock.
@@ -185,7 +187,7 @@ TaskResult Task::doTask(std::deque<Train>& trains) {
 
         std::unique_lock<std::mutex> tlock(tickets_mutex_);
         for (const auto& t : tickets_) {
-            if (t.getUserID() != sd_) continue;
+            if (t.getUserID() != user_id_) continue;
             found = true;
             msg += '['; msg += std::to_string(t.getTicketID()); msg += "]  ";
             msg += "车次：";   msg += std::to_string(t.getTrainID());  msg += ",  ";
@@ -214,7 +216,7 @@ TaskResult Task::doTask(std::deque<Train>& trains) {
             return {false, "发生错误。该票不存在，请重试。\n"};
         }
         Ticket& t = tickets_[ticket_id];
-        if (t.getUserID() != sd_ || t.getIsRefund()) {
+        if (t.getUserID() != user_id_ || t.getIsRefund()) {
             msg += "发生错误。该票已退换或您的输入有误，请重试。\n";
             return {true, std::move(msg)};
         }

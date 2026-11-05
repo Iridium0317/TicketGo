@@ -8,7 +8,7 @@ extern std::vector<Station> all_stations;
 std::atomic<int> Ticket::ticket_quantity_{0};
 std::atomic<int> Ticket::total_income_{0};
 
-Ticket::Ticket(int user_id, int train_id, int from_station_abs, int to_station_abs)
+Ticket::Ticket(std::uint64_t user_id, int train_id, int from_station_abs, int to_station_abs)
     : user_id_(user_id)
     , train_id_(train_id)
     , from_station_(from_station_abs)
@@ -20,7 +20,7 @@ Ticket::Ticket(int user_id, int train_id, int from_station_abs, int to_station_a
     total_income_.fetch_add(price_, std::memory_order_relaxed);
 }
 
-int Ticket::getUserID()   const noexcept { return user_id_;   }
+std::uint64_t Ticket::getUserID() const noexcept { return user_id_; }
 int Ticket::getTicketID() const noexcept { return ticket_id_; }
 int Ticket::getPrice()    const noexcept { return price_;      }
 int Ticket::getTrainID()  const noexcept { return train_id_;   }

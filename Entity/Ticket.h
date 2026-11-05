@@ -7,8 +7,11 @@
 //   * getFromStationName / getToStationName  →  return const std::string&
 //     (zero-copy, no dangling char* from a local Station)
 //   * All accessor methods are const-qualified
+//   * user_id_ is the server-assigned connection id (never reused), not the
+//     socket fd: fds are recycled after close, ids are not
 // =============================================================================
 #include <atomic>
+#include <cstdint>
 #include <string>
 #include "Station.h"
 
@@ -19,9 +22,9 @@ public:
     static std::atomic<int> total_income_;
 
     // absolute station IDs into the global all_stations vector
-    Ticket(int user_id, int train_id, int from_station_abs, int to_station_abs);
+    Ticket(std::uint64_t user_id, int train_id, int from_station_abs, int to_station_abs);
 
-    int               getUserID()           const noexcept;
+    std::uint64_t     getUserID()           const noexcept;
     int               getTicketID()         const noexcept;
     int               getPrice()            const noexcept;
     int               getTrainID()          const noexcept;
@@ -35,7 +38,7 @@ public:
     int  getRelativeTo()   const noexcept;
 
 private:
-    int  user_id_;
+    std::uint64_t user_id_;
     int  ticket_id_;
     int  price_;
     int  train_id_;

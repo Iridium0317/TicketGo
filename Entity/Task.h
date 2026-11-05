@@ -6,15 +6,16 @@
 //   1. char content_[MAX_BUFFER] + strcpy  →  std::string  (no overflow).
 //   2. strtok / atoi  →  std::string_view tokeniser (zero-copy, thread-safe).
 //   3. struct Message { int code; char message[2048]; }  →
-//      TaskResult using std::optional<std::string>:
-//         - value present  = success, contains the reply string
-//         - std::nullopt   = error/decode failure (caller uses error_msg)
-//      This eliminates the code=-1 magic number and the char[] copy.
+//      TaskResult { bool success; std::string message; }, so the reply
+//      has no fixed size and needs no char[] copy.
 //   4. All magic-number command IDs replaced with inline constexpr.
-//   5. tickets_ stored as std::shared_ptr reference to support safe
-//      concurrent ownership across the thread pool.
+//   5. tickets_ is a plain reference to the vector owned by Server, which
+//      outlives every Task.
 //   6. The Ticket vector itself is guarded by a std::mutex owned by Server;
-//      Task::doTask() receives a reference to that mutex and locks for writes.
+//      Task::doTask() receives a reference to that mutex and holds it for
+//      every read or write of tickets_.
+//   7. Tickets are owned by user_id_ (the connection id), not by sd_: the
+//      fd is only used to send the reply, because fds are reused.
 // =============================================================================
 #include <string>
 #include <string_view>
@@ -22,6 +23,7 @@
 #include <vector>
 #include <optional>
 #include <mutex>
+#include <cstdint>
 
 #include "Train.h"
 #include "Ticket.h"
@@ -43,6 +45,7 @@ struct TaskResult {
 class Task {
 public:
     Task(int sd,
+         std::uint64_t user_id,
          std::string content,
          std::vector<Ticket>& tickets,
          std::mutex& tickets_mutex);
@@ -61,6 +64,7 @@ public:
 
 private:
     int              sd_;
+    std::uint64_t    user_id_;
     std::string      content_;
     int              operate_number_{-1};
     std::vector<int> operate_arguments_;

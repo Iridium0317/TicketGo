@@ -22,6 +22,12 @@
 //                     → WORKER_THREAD_COUNT joinable threads with a
 //                        stop_flag_ for clean shutdown
 //  * All sockets set O_NONBLOCK so the event loop never blocks on I/O
+//  * Each accepted connection gets a 64-bit connection id that is never
+//    reused; tickets belong to that id, not to the fd, so a client that
+//    later gets a recycled fd cannot see or refund an earlier client's
+//    tickets
+//  * An fd is closed only once no queued or running task refers to it, so
+//    a worker can never send a reply to a newer connection on the same fd
 //
 // =============================================================================
 #include <sys/epoll.h>
@@ -125,8 +131,12 @@ private:
     // Registers fd with epoll for EPOLLIN | EPOLLET.
     bool epollAdd(int fd) noexcept;
 
-    // Removes fd from epoll and closes it.
+    // Removes fd from epoll and closes it, or defers the close to the last
+    // worker still holding a task for it.
     void epollRemove(int fd) noexcept;
+
+    // Closes fd and frees its slot.  Caller holds conn_mutex_.
+    void closeConnLocked(int fd) noexcept;
 
     // Called from the event loop when the listen socket fires.
     void handleNewConnection();
@@ -155,7 +165,15 @@ private:
     BitmapAllocator slot_alloc_;
     // client_fd_[slot] = fd  (needed to iterate / close on shutdown)
     std::vector<int> client_fd_;
-    // Mutex guarding slot_alloc_, fd_to_slot_, client_fd_.
+    // fd → id of the connection currently on it (0 = none).
+    std::vector<std::uint64_t> fd_conn_id_;
+    // fd → tasks queued or running for it; the fd stays open while > 0.
+    std::vector<int> fd_inflight_;
+    // fd → peer gone, close as soon as fd_inflight_ drops to 0.
+    std::vector<char> fd_closing_;
+    std::uint64_t next_conn_id_{1};
+    // Mutex guarding slot_alloc_, fd_to_slot_, client_fd_, fd_conn_id_,
+    // fd_inflight_, fd_closing_, next_conn_id_.
     std::mutex conn_mutex_;
 
     // ── Task queue ───────────────────────────────────────────────────────
