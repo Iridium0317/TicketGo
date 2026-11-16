@@ -21,7 +21,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-`ticketgo_server` needs Linux (`epoll`). `ticketgo_client` and `ticketgo_bench` also build on macOS.
+`ticketgo_server` and `ticketgo_latency` need Linux (`epoll`). `ticketgo_client` and `ticketgo_bench` also build on macOS.
 
 ## Run
 
@@ -66,6 +66,28 @@ Results below are from a Docker `gcc:13` container with 8 vCPUs, running on an A
 The load generator is the bottleneck in these runs. When the server and client were pinned to separate 4-core sets, the Python client used all 4 of its cores, while the server used about 1.2 cores at 10K connections. The throughput figures are therefore lower bounds for the server. Latencies are measured on the client and include asyncio scheduling, so they are not reported here as server latency.
 
 Profiling with `perf` at 10K connections shows the reactor thread spends about 60% of its CPU in `pushTask` → `pthread_cond_signal` → futex wake-ups of worker threads. This is the hand-off cost of the single-reactor + worker-pool design. A one-loop-per-thread design would remove it.
+
+### Throughput and latency with a C++ client
+
+`load_test.py` is limited by Python, so `benchmark/latency_client.cc` drives the server from C++ instead. It spreads N connections over a few threads, each with its own `epoll` loop. Every connection first gets one reply from the server, then all connections start together. Each connection sends a query, waits for the full reply, records the time from just before `send()` to the last byte read, and sends the next query. The first 2 seconds are a warm-up and are not counted.
+
+```bash
+ulimit -n 200000
+./build/ticketgo_server >/dev/null &
+./build/ticketgo_latency --conns 1000 --threads 4 --seconds 10
+```
+
+Setup: Docker `gcc:13` container (Debian 12, Linux 6.10, aarch64) with 8 vCPUs and 7.6 GB of memory, on an Apple M2 Mac. Server and client run in the same container and talk over loopback, with no CPU pinning. Built with `-O3 -DNDEBUG`. Server output goes to `/dev/null`; printing every request to a terminal is much slower.
+
+| Connections | Client threads | Runs | Failed | Throughput (req/s) | p50 | p95 | p99 | p99.9 |
+|---|---|---|---|---|---|---|---|---|
+| 1     | 1 | 1 | 0 | 21.5K       | 45 µs   | 53 µs   | 68 µs   | 0.33 ms   |
+| 10    | 2 | 1 | 0 | 133K        | 61 µs   | 119 µs  | 186 µs  | 1.3 ms    |
+| 1,000 | 4 | 8 | 0 | 380K – 605K | 1.5 – 2.2 ms | 2.7 – 4.2 ms | 4.9 – 10.9 ms | 18 – 90 ms |
+
+The 1,000-connection row is the range over 8 runs of 10 seconds each, split over two server processes (3 runs and 5 runs). The runs vary a lot: the median throughput is about 470K req/s, and p99 was above 10 ms in 1 of the 8 runs. The tail is probably affected by the Docker VM sharing the Mac with other work.
+
+These are client-side times over loopback, so they include the client's own work and no real network. With 1,000 connections each always waiting on one reply, most of the latency is time spent in the server's queue: 1,000 requests in flight at about 500K req/s is about 2 ms each, which matches p50. The 1- and 10-connection rows show the cost of a single request when there is no queue.
 
 ### Concurrent purchase (oversell) test
 

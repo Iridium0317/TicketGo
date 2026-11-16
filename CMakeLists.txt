@@ -73,6 +73,15 @@ target_link_libraries(ticketgo_bench PRIVATE Threads::Threads)
 # Optimise aggressively so we measure the lock overhead, not codegen noise.
 target_compile_options(ticketgo_bench PRIVATE -O3 -march=native)
 
+# ── Latency client (Linux only: uses epoll) ───────────────────────────────
+# Closed-loop load generator that reports throughput and p50/p95/p99.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(ticketgo_latency
+        benchmark/latency_client.cc
+    )
+    target_link_libraries(ticketgo_latency PRIVATE Threads::Threads)
+endif()
+
 # ── Optional: AddressSanitiser build type ─────────────────────────────────
 # cmake -DCMAKE_BUILD_TYPE=Asan ..
 if(CMAKE_BUILD_TYPE STREQUAL "Asan")
